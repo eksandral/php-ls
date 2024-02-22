@@ -1,0 +1,6 @@
+/target
+/Cargo.lock
+.DS_Store
+.env
+log4rs.yml
+php.db*
