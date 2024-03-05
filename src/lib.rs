@@ -1,14 +1,17 @@
 pub mod db;
 pub mod indexer;
+pub mod utils;
 
-use std::str::FromStr;
+use std::{cell::RefCell, str::FromStr};
 
-use lsp_types::{Location, Position, Range, Url};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteQueryResult, SqliteRow},
-    ConnectOptions, Executor, Row, SqliteConnection, SqlitePool,
-};
+use db::Db;
+use lsp_types::{InitializeParams, Location, Position, Range, Url};
+use sqlx::{sqlite::SqliteRow, Row};
 use tree_sitter::Node;
+thread_local! {
+
+    pub static DB: RefCell<Option<Db>> = RefCell::new(None);
+}
 
 #[derive(Debug)]
 pub struct Symbol {
@@ -62,7 +65,7 @@ pub fn get_node_name(node: &Node, document: &[u8]) -> Option<String> {
 }
 pub fn debug_node<'a>(node: &'a tree_sitter::Node<'a>, lvl: usize) {
     let width = lvl * 4;
-    println!(
+    log::debug!(
         "{:width$}{:?} => {:?}({}), ID={:?}",
         "",
         node,
@@ -70,4 +73,20 @@ pub fn debug_node<'a>(node: &'a tree_sitter::Node<'a>, lvl: usize) {
         node.kind_id(),
         node.id()
     );
+}
+
+pub trait ParamsGetProjectPath {
+    fn get_project_path(&self) -> anyhow::Result<std::path::PathBuf>;
+}
+impl ParamsGetProjectPath for InitializeParams {
+    fn get_project_path(&self) -> anyhow::Result<std::path::PathBuf> {
+        let root_path = self
+            .root_uri
+            .clone()
+            .map(|url| url.to_file_path().ok())
+            .flatten()
+            .ok_or(anyhow::anyhow!("Invalid project ROOT URI"))?;
+
+        Ok(root_path)
+    }
 }

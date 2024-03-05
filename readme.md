@@ -1,8 +1,6 @@
 # Naive implementation of php ls
+this project is in pre-alpha stage!!!
 
-```
-
-```
 ##  supported requests
 - autocompletion
 - hover
@@ -36,3 +34,17 @@ now we need class references and method references.
 
 - once namespace_use_declaration node appears we need to map its name or alias to FQL 
 that will allow as to use this map to detect FQN in object creation expression
+
+
+## GO TO DEFINITION
+### Naive version
++1. detect class name under current cursor
++2. scan whole project to find class name declaration node
++3. get location and pass it to response.
+
+@TODO
+- Static class calls are not detected as object_creation_expression
+we should use scoped_call_expression for this
+
+- run the indexer when ls is started.
+

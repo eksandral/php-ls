@@ -35,11 +35,7 @@ impl index::Indexer for FunctionDeclarationIndexer {
         let fqn = format!("{}::{}", class_row.fqn, method_name);
         let record = ClassRecord {
             id: 0,
-            kind: ClassRecordKind::Method,
             fqn,
-            name: method_name,
-            implementations: Vec::new(),
-            implements: Vec::new(),
             location,
         };
         index.save_row(&record).unwrap();

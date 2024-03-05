@@ -1,22 +1,28 @@
-use std::{cell::RefCell, collections::HashMap, error::Error, fs::read_to_string, path::Path};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    error::Error,
+    fs::{read, read_to_string},
+    path::Path,
+};
 
 use crossbeam_channel::{select, Receiver};
 use lsp_types::{
-    request::{GotoDefinition, HoverRequest},
     CompletionItem, CompletionOptions, CompletionResponse, DeclarationCapability,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverProviderCapability, InitializeParams,
-    Location, MarkupContent, OneOf, Position, ServerCapabilities, ServerInfo, SignatureHelpOptions,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    Location, MarkupContent, OneOf, Position, Range, ServerCapabilities, ServerInfo,
+    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
-use php_ls::debug_node;
-use serde::Serialize;
-use tree_sitter::{Node, Parser};
+use php_ls::{debug_node, indexer::reindex_project, utils::PositionInRange, ParamsGetProjectPath, DB};
+use tree_sitter::Parser;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NAME: &str = env!("CARGO_PKG_NAME");
 thread_local! {
     static NS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static VARS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
@@ -48,9 +54,6 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         version: Some(VERSION.to_string()),
     })?;
 
-    log::debug!("before connection initialize");
-    //let initialization_params = connection.initialize(server_capabilities)?;
-
     let (id, params) = connection.initialize_start()?;
 
     let initialize_data = serde_json::json!({
@@ -59,8 +62,12 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     });
 
     connection.initialize_finish(id, initialize_data)?;
+    let params: InitializeParams = serde_json::from_value(params)?;
 
-    log::debug!("after connection initialize");
+    let root_path = params.get_project_path()?;
+    // Reindex project
+    reindex_project(&root_path)?;
+    // Run main loop
     main_loop(connection, params)?;
     io_threads.join()?;
 
@@ -71,9 +78,8 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
 
 fn main_loop(
     connection: Connection,
-    params: serde_json::Value,
+    params: InitializeParams,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let params: InitializeParams = serde_json::from_value(params).unwrap();
     let mut state = ServerState { params };
     log::debug!("starting example main loop");
     while let Some(msg) = next_event(&connection.receiver) {
@@ -117,7 +123,7 @@ fn main_loop(
     //        }
     //        Message::Response(resp) => {
     //            log::debug!("got response: {:?}", resp);
-    //        }
+    //        }: 'name' was just an example
     //        Message::Notification(not) => {
     //            log::debug!("got notification: {:?}", not);
     //        }
@@ -166,9 +172,9 @@ impl ServerState {
                 Ok(Some(Response::new_ok(id, result)))
             }
             Request { id, method, params } if method == "textDocument/definition" => {
+                let mut list = vec![];
                 NS.set(HashMap::new());
                 let params: GotoDefinitionParams = serde_json::from_value(params)?;
-                log::debug!("PARAMS OF DEFINITION REQ: {params:#?}");
                 let current_positon = params.text_document_position_params.position;
                 let path = params
                     .text_document_position_params
@@ -176,24 +182,25 @@ impl ServerState {
                     .uri
                     .path()
                     .to_string();
-                let resutl = find_node_with_position(current_positon, path);
-
-                log::debug!("{:#?}", resutl);
-                //let list = vec![Location {
-                //    uri: Url::parse("file:///home/eksandral/projects/php-template/src/Engine.php")
-                //        .unwrap(),
-                //    range: lsp_types::Range {
-                //        start: lsp_types::Position {
-                //            line: 10,
-                //            character: 21,
-                //        },
-                //        end: Position {
-                //            line: 10,
-                //            character: 31,
-                //        },
-                //    },
-                //}];
-                let list = vec![];
+                if let Some(class_name) = detect_class_name(current_positon, path)? {
+                    if let Ok(results) = DB.with_borrow_mut(|db| {
+                        if let Some(db) = db {
+                            log::debug!("BEFORE SEARCH");
+                            let r = db.find_by_fqn(&class_name);
+                            log::debug!("FROM DB {:?}", r);
+                            r
+                        } else {
+                            Ok(vec![])
+                        }
+                    }) {
+                        results.iter().for_each(|row| {
+                            list.push(row.location.clone());
+                        });
+                    }
+                    //if let Some(location) = self.find_location(class_name) {
+                    //    list.push(location);
+                    //}
+                }
                 let value = GotoDefinitionResponse::Array(list);
                 let result = serde_json::to_value(value)?;
                 Ok(Some(Response::new_ok(id, result)))
@@ -212,6 +219,121 @@ impl ServerState {
     fn complete_request(&mut self, resp: Response) -> anyhow::Result<Option<Response>> {
         log::debug!("git respose :{resp:?}");
         Ok(None)
+    }
+
+    fn find_location(&mut self, class_name: String) -> Option<Location> {
+        let root_path = self
+            .params
+            .root_uri
+            .clone()
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        let files: Vec<_> = walkdir::WalkDir::new(&root_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "php"))
+            .map(|file| file.path().to_str().unwrap().to_owned())
+            .collect();
+        //let mut index_clone = index.clone();
+        for path in files.iter() {
+            let mut parser = Parser::new();
+            parser
+                .set_language(tree_sitter_php::language_php())
+                .expect("Error loading PHP parsing support");
+            let contents = match read(&path) {
+                Ok(out) => out,
+                Err(e) => {
+                    println!("ERROR:{}", e);
+                    println!("{}", path.clone());
+                    continue;
+                }
+            };
+            let parsed = parser.parse(&contents, None);
+            let tree = if let Some(tree) = parsed {
+                tree
+            } else {
+                log::error!("I cannot parse {:?}", &path);
+                continue;
+            };
+            let root_node = tree.root_node();
+            let mut ns = None;
+            for i in 0..root_node.child_count() {
+                if let Some(child) = root_node.child(i) {
+                    //log::debug!("ROOT NODE CHILD: {:?} {:?}", child, child.kind());
+                    if child.kind() == "namespace_definition" {
+                        for n in 0..child.child_count() {
+                            if let Some(child) = child.child(n) {
+                                if child.kind() == "namespace_name" {
+                                    log::debug!("{:?} === >>> {:?}", child, child.kind());
+                                    log::debug!(
+                                        "------>>> NS DEF {:?}",
+                                        child.utf8_text(&contents)
+                                    );
+                                    ns = child.utf8_text(&contents).ok();
+                                }
+                            }
+                        }
+                    }
+                    if child.kind() == "class_declaration" {
+                        for n in 0..child.child_count() {
+                            if let Some(child) = child.child(n) {
+                                if child.kind() == "name" {
+                                    log::debug!("{:?} === >>> {:?}", child, child.kind());
+                                    if let Some(ns) = ns {
+                                        if let Some(name) = child.utf8_text(&contents).ok() {
+                                            let fqn = format!("{ns}\\{name}");
+                                            log::debug!(
+                                                "FQN of found class = {}, {:?}",
+                                                &fqn,
+                                                fqn == class_name
+                                            );
+                                            log::debug!(
+                                                "URL {:?}: {:?}",
+                                                &path,
+                                                Url::from_file_path(path)
+                                            );
+                                            if fqn == class_name {
+                                                let location = Location {
+                                                    uri: Url::from_file_path(path).unwrap(),
+
+                                                    range: Range {
+                                                        start: Position {
+                                                            line: child.start_position().row as u32,
+                                                            character: child.start_position().column
+                                                                as u32,
+                                                        },
+                                                        end: Position {
+                                                            line: child.end_position().row as u32,
+                                                            character: child.end_position().column
+                                                                as u32,
+                                                        },
+                                                    },
+                                                };
+                                                log::debug!("prepared location {:?}", &location);
+                                                return Some(location);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            //{
+            //    let mut cursor = tree.walk();
+            //    cursor.goto_first_child();
+            //    loop {
+            //        let node = cursor.node();
+            //        if !cursor.goto_next_sibling() {
+            //            break;
+            //        }
+            //    }
+            //}
+        }
+        None
     }
 }
 struct ServerState {
@@ -239,6 +361,7 @@ where
     cursor.goto_first_child();
     let mut out = None;
     let mut ns = HashMap::new();
+    // 1. Detect FQN of the class
     loop {
         let node = cursor.node();
 
@@ -250,19 +373,16 @@ where
             break;
         }
     }
-    log::debug!("out = {out:?}");
-    log::debug!("finish loop");
-
-    Ok(None)
+    Ok(out)
 }
 fn parse_node<'a>(
     node: &'a tree_sitter::Node<'a>,
     lvl: usize,
     contents: &[u8],
-    positon: Position,
+    position: Position,
     ns: &mut HashMap<String, String>,
 ) -> Option<String> {
-    //debug_node(node, lvl);
+    debug_node(node, lvl);
     let width = lvl * 4;
     let range = node.range();
     match node.kind() {
@@ -289,18 +409,13 @@ fn parse_node<'a>(
                 ns.entry(key).or_insert(ns_fqn.unwrap());
             }
         }
-        "object_creation_expression"
-            if (range.start_point.row == positon.line as usize
-                && range.start_point.column <= positon.character as usize
-                && range.end_point.row == positon.line as usize
-                && range.end_point.column >= positon.character as usize) =>
-        {
-            log::debug!(
-                "{:width$}[{lvl}]{:#?}: {:?}",
-                " ",
-                node.kind(),
-                node.range()
-            );
+        "object_creation_expression" => {
+            //log::debug!(
+            //    "{:width$}[{lvl}]{:#?}: {:?}",
+            //    " ",
+            //    node.kind(),
+            //    node.range()
+            //);
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
                     if child.kind() == "name" {
@@ -310,7 +425,27 @@ fn parse_node<'a>(
                             log::debug!("OBJECT CREATION EXPRESSION name = {}", &obj_name);
                             log::debug!("{:?}", &ns);
                             if let Some(fqn) = ns.get(&obj_name) {
-                                return Some(fqn.to_string());
+                                // before return FQN lets map a variable to this fqn
+                                // search for assignment_expression
+                                if let Some(parent) = node.parent() {
+                                    if parent.kind() == "assignment_expression" {
+                                        if let Some(var_node) = parent.child(0) {
+                                            if let Some(name) = var_node.child(1) {
+                                                let var_name = name
+                                                    .utf8_text(contents)
+                                                    .ok()
+                                                    .unwrap_or_default();
+                                                VARS.with_borrow_mut(|vars| {
+                                                    vars.entry(var_name.to_string())
+                                                        .or_insert(fqn.to_string());
+                                                })
+                                            }
+                                        }
+                                    }
+                                }
+                                if range.includes(&position) {
+                                    return Some(fqn.to_string());
+                                }
                             }
                         }
                     }
@@ -318,18 +453,58 @@ fn parse_node<'a>(
             }
             return None;
         }
+        "scoped_call_expression" => {}
+        "member_call_expression" if range.includes(&position) => {
+            log::debug!("this is the member");
+            if let Some(name) = node.child(0) {
+                let type_name = match name.kind() {
+                    "variable_name" => {
+                        log::debug!("i found a var name of the member call");
+                        let var_name = name.utf8_text(contents).ok().unwrap_or_default();
+                        log::debug!("this is a variable {}", &var_name[1..]);
+                        VARS.with_borrow(|x| {
+                            log::debug!("{:?}", x);
+                            x.get(&var_name[1..]).map(|x| x.to_string())
+                        })
+                    }
+                    "scoped_call_expression" => {
+                        if let Some(child) = name.child(0) {
+                            let obj_name = child.utf8_text(contents).ok().unwrap_or_default();
+                            log::debug!("NAMESAPCES {:?}; Obj name {:?}", ns, obj_name);
+                            ns.get(obj_name).map(|x| x.to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                log::debug!("Detected type name is  {:?}", type_name);
+                if let Some(type_name) = type_name {
+                    if let Some(name) = node.child(2).filter(|x| x.range().includes(&position)) {
+                        if let Some(method_name) = name.utf8_text(contents).ok() {
+                            log::debug!("{}::{}", type_name, method_name);
+                            return Some(format!("{}::{}", type_name, method_name));
+                        }
+                    }
+                }
+            }
+        }
         _ => (),
     }
     //log::debug!("{}", node.utf8_text(contents).unwrap());
     for child in 0..node.child_count() {
-        if let Some(found) =
-            parse_node(&node.child(child).unwrap(), lvl + 1, &contents, positon, ns)
-        {
+        if let Some(found) = parse_node(
+            &node.child(child).unwrap(),
+            lvl + 1,
+            &contents,
+            position,
+            ns,
+        ) {
             return Some(found);
         }
     }
     None
 }
-fn find_node_with_position<'a>(positon: Position, path: String) -> anyhow::Result<Option<String>> {
+fn detect_class_name(positon: Position, path: String) -> anyhow::Result<Option<String>> {
     parse_file(path, positon)
 }

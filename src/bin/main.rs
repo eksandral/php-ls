@@ -29,11 +29,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     };
     let record = ClassRecord {
         id: 1309,
-        kind: ClassRecordKind::Class,
-        name: "stdClass".to_string(),
         fqn: "\\stdClass".to_string(),
-        implementations: Vec::new(),
-        implements: Vec::new(),
         location,
     };
     let value = serde_json::to_value(record)?;
