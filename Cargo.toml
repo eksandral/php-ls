@@ -15,7 +15,7 @@ log4rs = "1.2.0"
 walkdir = "2.4.0"
 clap = { version = "4.4.7", features = ["derive", "env"] }
 tree-sitter = "0.20"
-tree-sitter-php = { git = "https://github.com/tree-sitter/tree-sitter-php.git", branch = "master" }
+tree-sitter-php = { git = "https://github.com/tree-sitter/tree-sitter-php.git", tag = "v0.22.2" }
 rayon = "1.8.0"
 env_logger = "0.11.0"
 dotenv = "0.15.0"

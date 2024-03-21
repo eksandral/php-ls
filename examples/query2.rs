@@ -1,5 +1,5 @@
 use core::panic;
-use std::{collections::HashMap, fs::read, os::fd::AsRawFd};
+use std::{collections::HashMap, fmt::format, fs::read, os::fd::AsRawFd};
 
 use tree_sitter::{Parser, Query, QueryCursor, QueryMatch};
 use tree_sitter_php::language_php;
@@ -23,79 +23,100 @@ fn main() -> anyhow::Result<()> {
     };
     let root_node = tree.root_node();
     print_tree(&root_node, 0);
-    let queries = vec![vec![
-        "(declaration_list 
-            (method_declaration  
-                (visibility_modifier)? @modifier 
-                name: (name) @method_name
-                parameters: (formal_parameters) @params
-            ) @method_declaration
-            )",
-    ]];
+    let queries = vec![
+        // Namespace detection
+        vec!["(namespace_definition (namespace_name) @ns_name)"],
+        vec!["(class_declaration (name) @class_name)"],
+        vec![
+            "(declaration_list (method_declaration
+               name: (name) @method_name
+               parameters: (formal_parameters) @params
+               return_type: (_)? @return_type
+))",
+        ], //vec!["(namespace_use_declaration (namespace_use_clause (qualified_name(namespace_name_as_prefix) @ns_q_name (name) @class_name) (namespace_aliasing_clause (name) @alias)?))",],
+           ////
+           //vec!["(assignment_expression ( (variable_name (name) @var_name)  (object_creation_expression (name) @object_name)))"],
+           //vec!["(member_call_expression (variable_name) @varname (name) @method_name)",
+           // "(member_call_expression (parenthesized_expression (object_creation_expression (name) @class_name) ) (name) @method_name)",
+           //         "
+           //   (member_call_expression
+           //       (parenthesized_expression
+           //           (object_creation_expression
+           //               (qualified_name
+           //                   (namespace_name_as_prefix)? @ns_as_prefix
+           //                   (name) @cass_name
+           //               )
+           //           )
+           //       )
+           //       (name) @method_name
+           //   )",
+           //           "(scoped_call_expression (name) @class_name (name) @method_name)"
+           //       ],
+           //vec!["(obect_creation_expression (name)  @class_name)",
+           //     "(obect_creation_expression (qualified_name (namespace_as_prefix) @ns_name (name) @class_name)"],
+    ];
     //let mut ns_map = HashMap::new();
     //let mut vars_map = HashMap::new();
+
+    let mut current_namespace = Some("");
+    let mut current_classname = Some("");
     for (idx, query) in queries.iter().enumerate() {
         let query = query.join("\n");
         let query = Query::new(language_php(), &query)?;
         let mut query_cursor = QueryCursor::new();
         let matches = query_cursor.matches(&query, root_node, &contents[..]);
-
+        let mut comment = Some("");
         for m in matches {
-            //log::debug!("================== current match's idx = {} ===============", idx);
+            //log::debug!("current idx = {}", idx);
+            log::debug!("Captures {:#?}", m.captures);
             match idx {
                 0 => {
-                    //log::debug!("{:#?}", m.captures);
-                    //
-                    let mut description = Some(String::new());
-                    let mut name = None;
-                    let mut modifiers = Some("default");
-                    let mut params = None;
-                    for capture in m.captures {
-                        let node_text = capture.node.utf8_text(&contents).unwrap();
-                        match capture.node.kind() {
-                            "method_declaration" => {
-                                if let Some(comment_node) = capture.node.prev_sibling() {
-                                    if comment_node.kind() == "comment" {
-                                        let node_text = comment_node.utf8_text(&contents).unwrap();
-                                        let desc: Vec<&str> = node_text
-                                            .split("\n")
-                                            .map(|x| x.trim())
-                                            .filter(
-                                                |&x| {
-                                                    x.len() > 2
-                                                        && (&x[..3] != "* @" && &x[..3] != "/**")
-                                                }, //x[]("/**") || !x.starts_with("* @") || x[0..3] != "*/"
-                                            )
-                                            .map(|x| &x[2..])
-                                            .collect();
-                                        description = Some(desc.join("\n"));
-                                    }
-                                }
-                            }
-                            "visibility_modifier" => {
-                                modifiers = Some(node_text);
-                            }
-                            "name" => {
-                                name = Some(node_text);
-                            }
-                            "formal_parameters" => {
-                                params = Some(node_text);
-                            }
-                            _ => (),
-                        }
-                    }
-                    description
-                        .as_slice()
-                        .iter()
-                        .zip(modifiers.as_slice().iter())
-                        .zip(name.as_slice().iter())
-                        .zip(params.as_slice().iter())
-                        .for_each(|(((desc, modifier), name), param)| {
-                            log::debug!("\n\n\"{desc}\"\n{modifier} {name}{param}");
-                        });
-                    //log::debug!("description = {:?}", description);
-                    //log::debug!("modifiers = {:?}", modifiers);
-                    //log::debug!("name = {:?}", name);
+                    current_namespace = m.captures[0].node.utf8_text(&contents).ok();
+                }
+                1 => {
+                    current_classname = m.captures[0].node.utf8_text(&contents).ok();
+                }
+                2 => {
+                    //method declaration
+                    let comment = m.captures[0]
+                        .node
+                        // look for parent node which should be method_declaration
+                        .parent()
+                        .map(|p| {
+                            // check if there is a prev sibling that has comment type
+                            p.prev_sibling()
+                                .filter(|c| c.kind() == "comment")
+                                .map(|c| c.utf8_text(&contents).ok())
+                                .flatten()
+                        })
+                        .flatten()
+                        .unwrap_or_default();
+                    let desc: Vec<&str> = comment
+                        .split("\n")
+                        .map(|x| x.trim())
+                        .filter(
+                            |&x| x.len() > 2 && (&x[..3] != "* @" && &x[..3] != "/**"), //x[]("/**") || !x.starts_with("* @") || x[0..3] != "*/"
+                        )
+                        .map(|x| &x[2..])
+                        .collect();
+                    let comment = desc.join("\n");
+                    let method_name = m.captures[0].node.utf8_text(&contents).ok().unwrap();
+                    let method_params = m.captures[1].node.utf8_text(&contents).ok().unwrap();
+                    let fqn = format!(
+                        "{}\\{}::{}{}",
+                        current_namespace.unwrap(),
+                        current_classname.unwrap(),
+                        method_name,
+                        method_params,
+                    );
+                    log::debug!("method's FQN = {}", fqn);
+                    let return_type = if let Some(rt) = m.captures.get(2) {
+                        rt.node.utf8_text(&contents).ok()
+                    } else {
+                        Some("void")
+                    };
+                    log::debug!("Return type is {:?}", return_type);
+                    log::debug!("Comment is ++++>>> {}", comment);
                 }
                 //0 => {
                 //    //Obect creation expression

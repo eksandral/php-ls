@@ -30,7 +30,11 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let record = ClassRecord {
         id: 1309,
         fqn: "\\stdClass".to_string(),
+        description: Default::default(),
         location,
+        parameters: None,
+        attributes: None,
+        return_type: None,
     };
     let value = serde_json::to_value(record)?;
     log::debug!("{}", value);

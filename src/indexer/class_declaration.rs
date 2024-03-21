@@ -1,145 +1,148 @@
 use lsp_types::{Location, Position, Range, Url};
+use tree_sitter::{Query, QueryCursor};
+use tree_sitter_php::language_php;
 
 use crate::{
     db::{ClassRecord, ClassRecordKind, Db},
-    get_node_name,
+    get_node_name, ToLocation,
 };
 
 use super::index;
 
-const NODE_ID: u16 = 220;
+const NODE_ID: &'static str = "class_declaration";
 #[derive(Debug, Default)]
 pub struct ClassDeclarationIndexer {}
 impl index::Indexer for ClassDeclarationIndexer {
-    fn do_index(&self, index: &mut Db, document: &[u8], node: &tree_sitter::Node, url: &Url) {
-        let class_name = get_node_name(&node, document).unwrap_or(String::new());
-        let mut ns_name = String::new();
-        let mut sibling = node.prev_sibling();
-        while let Some(s) = sibling {
-            //log::debug!("{s:?} => {:?}", s.kind_id());
-            // namespace_definition == 204
-            if s.kind_id() == 204 {
-                log::debug!("NS: {:?}", s.utf8_text(document));
-                for i in 0..s.child_count() {
-                    if let Some(child) = s.child(i) {
-                        log::debug!("------ {child:?}");
-                        if child.kind() == "namespace_name" {
-                            ns_name = child
-                                .utf8_text(document)
-                                .ok()
-                                .map_or("".to_string(), |x| x.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-            sibling = s.prev_sibling();
-        }
-        log::debug!("Full qualified name of class {}\\{}", ns_name, class_name);
-        let class_fqn = format!("{ns_name}\\{class_name}");
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                log::debug!("CHILD OF CLASS {:?}", &child);
-                match child.kind() {
-                    "class_interface_clause" => self.index_class_interfaces(index, document, node),
-                    "base_clause" => self.index_base_class(index, document, node),
-                    "attribute_list" => (),
-                    "declaration_list" => {
-                        self.index_methods(index, document, &child, url, &class_fqn)
-                    }
-                    _ => continue,
-                }
-            }
-        }
-        let range = node.range();
-        let location: Location = Location {
-            uri: url.clone(),
-            range: Range {
-                start: Position {
-                    line: range.start_point.row as u32,
-                    character: range.start_point.column as u32,
-                },
-                end: Position {
-                    line: range.end_point.row as u32,
-                    character: range.end_point.column as u32,
-                },
-            },
-        };
-        let record = ClassRecord {
-            id: 0,
-            fqn: class_fqn,
-            location,
-        };
-        let r = index.save_row(&record).expect("Save record");
-        log::debug!("Result of saving record {:?}", r);
-    }
-    fn can_index(&self, node: &tree_sitter::Node) -> bool {
-        log::debug!("CAN I INDEX THIS NODE {node:?} {:?}", node.kind_id());
-        node.kind_id() == NODE_ID
-    }
-}
-impl ClassDeclarationIndexer {
-    pub fn index_class_interfaces(
-        &self,
-        index: &mut impl index::Index,
-        document: &[u8],
-        node: &tree_sitter::Node,
-    ) {
-        if let Some(child) = node.child_by_field_name("class_interface_clause") {
-            log::debug!("{child:?}")
-        }
-    }
-    pub fn index_base_class(
-        &self,
-        index: &mut impl index::Index,
-        document: &[u8],
-        node: &tree_sitter::Node,
-    ) {
-    }
-    fn index_methods(
+    fn index(
         &self,
         index: &mut Db,
         document: &[u8],
-        node: &tree_sitter::Node,
+        tree: &tree_sitter::Tree,
         url: &Url,
-        class_fqn: &str,
-    ) {
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if child.kind() == "method_declaration" {
-                    'child: for n in 0..child.child_count() {
-                        if let Some(child) = child.child(n) {
-                            if child.kind() == "name" {
-                                if let Some(name) = child.utf8_text(document).ok() {
-                                    let range = child.range();
-                                    let location: Location = Location {
-                                        uri: url.clone(),
-                                        range: Range {
-                                            start: Position {
-                                                line: range.start_point.row as u32,
-                                                character: range.start_point.column as u32,
-                                            },
-                                            end: Position {
-                                                line: range.end_point.row as u32,
-                                                character: range.end_point.column as u32,
-                                            },
-                                        },
-                                    };
-                                    let fqn = format!("{class_fqn}::{name}");
-                                    let record = ClassRecord {
-                                        id: 0,
-                                        fqn,
-                                        location,
-                                    };
-                                    let r = index.save_row(&record).expect("Save record");
-
-                                    break 'child;
-                                }
-                            }
-                        }
+    ) -> anyhow::Result<()> {
+        let root_node = tree.root_node();
+        let queries = vec![
+            // Namespace detection
+            vec!["(namespace_definition (namespace_name) @ns_name)"],
+            vec!["(class_declaration (name) @class_name)"],
+            vec![
+                "(declaration_list (method_declaration
+               name: (name) @method_name
+               parameters: (formal_parameters) @params
+               return_type: (_)? @return_type
+))",
+            ],
+        ];
+        let mut current_namespace = "";
+        let mut current_classname = "";
+        for (idx, query) in queries.iter().enumerate() {
+            let query = query.join("\n");
+            let query = Query::new(language_php(), &query)?;
+            let mut query_cursor = QueryCursor::new();
+            let matches = query_cursor.matches(&query, root_node, &document[..]);
+            let mut comment = "";
+            for m in matches {
+                //log::debug!("current idx = {}", idx);
+                //log::debug!("Captures {:#?}", m.captures);
+                match idx {
+                    0 => {
+                        current_namespace = m.captures[0].node.utf8_text(&document).unwrap_or("");
                     }
+                    1 => {
+                        let comment = m.captures[0]
+                            .node
+                            // look for parent node which should be method_declaration
+                            .parent()
+                            .map(|p| {
+                                // check if there is a prev sibling that has comment type
+                                p.prev_sibling()
+                                    .filter(|c| c.kind() == "comment")
+                                    .map(|c| c.utf8_text(&document).ok())
+                                    .flatten()
+                            })
+                            .flatten()
+                            .unwrap_or_default();
+                        let desc: Vec<&str> = comment
+                            .split("\n")
+                            .map(|x| x.trim())
+                            .filter(|&x| {
+                                !x.starts_with("* @")
+                                    && !x.starts_with("/**")
+                                    && !x.starts_with("*/")
+                            })
+                            .map(|x| if x.len() > 1 { x[1..].trim() } else { "" })
+                            .collect();
+                        let description = desc.join("\n");
+                        current_classname = m.captures[0].node.utf8_text(&document).unwrap_or("");
+                        let fqn = format!("{}\\{}", current_namespace, current_classname);
+
+                        let record = ClassRecord {
+                            id: 0,
+                            fqn,
+                            description,
+                            location: m.captures[0].node.range().to_locaton(url),
+                            parameters: None,
+                            attributes: None,
+                            return_type: None,
+                        };
+                        let r = index.save_row(&record).expect("Save record");
+                    }
+                    2 => {
+                        //method declaration
+
+                        let comment = m.captures[0]
+                            .node
+                            // look for parent node which should be method_declaration
+                            .parent()
+                            .map(|p| {
+                                // check if there is a prev sibling that has comment type
+                                p.prev_sibling()
+                                    .filter(|c| c.kind() == "comment")
+                                    .map(|c| c.utf8_text(&document).ok())
+                                    .flatten()
+                            })
+                            .flatten()
+                            .unwrap_or_default();
+                        let desc: Vec<&str> = comment
+                            .split("\n")
+                            .map(|x| x.trim())
+                            .filter(|&x| {
+                                !x.starts_with("* @")
+                                    && !x.starts_with("/**")
+                                    && !x.starts_with("*/")
+                            })
+                            .map(|x| if x.len() > 1 { x[1..].trim() } else { "" })
+                            .collect();
+                        let comment = desc.join("\n");
+                        let method_name = m.captures[0].node.utf8_text(&document).ok().unwrap();
+                        let method_params = m.captures[1].node.utf8_text(&document).ok().unwrap();
+                        let fqn = format!(
+                            "{}\\{}::{}",
+                            current_namespace, current_classname, method_name,
+                        );
+                        log::debug!("method's FQN = {}", fqn);
+                        let return_type = m
+                            .captures
+                            .get(2)
+                            .map(|rt| rt.node.utf8_text(&document).ok().map(|x| x.to_string()))
+                            .flatten();
+
+                        let record = ClassRecord {
+                            id: 0,
+                            fqn,
+                            description: comment.to_string(),
+                            location: m.captures[0].node.range().to_locaton(url),
+                            parameters: Some(method_params.into()),
+                            attributes: None,
+                            return_type,
+                        };
+                        // @TODO handle error
+                        let _ = index.save_row(&record).expect("Save record");
+                    }
+                    _ => (),
                 }
             }
         }
+        Ok(())
     }
 }

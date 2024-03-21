@@ -90,3 +90,24 @@ impl ParamsGetProjectPath for InitializeParams {
         Ok(root_path)
     }
 }
+pub trait ToLocation {
+    fn to_locaton(&self, url: &Url)-> Location;
+}
+impl ToLocation for tree_sitter::Range {
+    fn to_locaton(&self, url: &Url)-> Location {
+        
+        Location {
+            uri: url.clone(),
+            range: Range {
+                start: Position {
+                    line: self.start_point.row as u32,
+                    character: self.start_point.column as u32,
+                },
+                end: Position {
+                    line: self.end_point.row as u32,
+                    character: self.end_point.column as u32,
+                },
+            },
+        }
+    }
+}

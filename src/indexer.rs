@@ -16,8 +16,8 @@ thread_local! {
     ]);
 }
 pub mod class_declaration;
-pub mod class_reference;
-pub mod function_declarion;
+//pub mod class_reference;
+//pub mod function_declarion;
 pub mod index;
 
 #[derive(Debug, Default)]
@@ -73,20 +73,31 @@ pub fn reindex_project<P: AsRef<Path> + Debug>(root_path: P) -> anyhow::Result<(
         };
         let uri = Url::from_file_path(path).unwrap();
         {
-            let mut cursor = tree.walk();
-            cursor.goto_first_child();
-            loop {
-                let node = cursor.node();
-                DB.with_borrow_mut(|db| {
-                    if let Some(db) = db {
-                        parse_node(&node, db, 0, &contents, &uri);
-                    }
-                });
-                if !cursor.goto_next_sibling() {
-                    break;
+            DB.with_borrow_mut(|db| {
+                if let Some(db) = db {
+                    INDEXERS.with_borrow_mut(|indexers| {
+                        for indexer in indexers {
+                            indexer.index(db, &contents, &tree, &uri);
+                        }
+                    });
                 }
-            }
+            });
         }
+        //{
+        //    let mut cursor = tree.walk();
+        //    cursor.goto_first_child();
+        //    loop {
+        //        let node = cursor.node();
+        //        DB.with_borrow_mut(|db| {
+        //            if let Some(db) = db {
+        //                parse_node(&node, db, 0, &contents, &uri);
+        //            }
+        //        });
+        //        if !cursor.goto_next_sibling() {
+        //            break;
+        //        }
+        //    }
+        //}
     });
     Ok(())
 }
@@ -103,16 +114,15 @@ fn parse_node<'a>(
     //        "----------------------------------->>>>>>>   {:?}::::: {:?},   {}",
     //        get_node_name(&node, contents),
     //        node.named_child(1).unwrap().utf8_text(contents),
-    //        node.child_count(),
+    //        nnode.child_count(),
     //    )
     //}
 
-    INDEXERS.with_borrow_mut(|indexers| {
-        log::debug!("RUN INDEXERS");
-        for indexer in indexers {
-            indexer.index(index, &contents, node, uri);
-        }
-    });
+    //INDEXERS.with_borrow_mut(|indexers| {
+    //    for indexer in indexers {
+    //        indexer.index(index, &contents, node, uri);
+    //    }
+    //});
     //if node.kind_id() == 1 {
     //    println!(
     //        "-------->>>>> {:?}",

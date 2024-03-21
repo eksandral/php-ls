@@ -68,11 +68,11 @@ fn parse_node<'a>(
     //    )
     //}
 
-    INDEXERS.with_borrow_mut(|indexers| {
-        for indexer in indexers {
-            indexer.index(index, &contents, node, uri);
-        }
-    });
+   //INDEXERS.with_borrow_mut(|indexers| {
+   //    for indexer in indexers {
+   //        indexer.index(index, &contents, node, uri);
+   //    }
+   //});
     //if node.kind_id() == 1 {
     //    println!(
     //        "-------->>>>> {:?}",

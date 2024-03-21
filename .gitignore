@@ -5,3 +5,4 @@
 log4rs.yml
 php.db*
 .todo/
+*.log

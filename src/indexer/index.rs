@@ -1,17 +1,10 @@
 use lsp_types::Url;
-use tree_sitter::Node;
+use tree_sitter::Tree;
 
 use crate::db::Db;
 
 pub trait Indexer {
-    fn can_index(&self, node: &Node) -> bool;
-    fn index(&self, index: &mut Db, document: &[u8], node: &Node, url: &Url) {
-        if self.can_index(node) {
-            self.do_index(index, document, node, url);
-        }
-    }
-    fn do_index(&self, index: &mut Db, document: &[u8], node: &Node, url: &Url);
-    fn before_parse(&self, index: &mut Db, document: &[u8]) {}
+    fn index(&self, index: &mut Db, document: &[u8], tree: &Tree, url: &Url) -> anyhow::Result<()>;
 }
 
 pub trait Index {
